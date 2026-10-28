@@ -1,0 +1,14 @@
+{
+  "name": "Blueprint Rescue",
+  "short_name": "Blueprint",
+  "description": "A Cell City DNA adventure (PBS 1.1.5, Mr. Almond).",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "background_color": "#2fb2f2",
+  "theme_color": "#1d9be8",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
