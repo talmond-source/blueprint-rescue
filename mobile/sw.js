@@ -1,5 +1,5 @@
 // Offline cache for the phone edition: keeps the game playable after the first visit.
-const CACHE = "blueprint-mobile-v1";
+const CACHE = "blueprint-mobile-v2";
 const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png",
   "https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting())); });

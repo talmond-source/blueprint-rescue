@@ -1176,6 +1176,18 @@ const SND = {
     for (let c = 0; c < 2; c++) { const ch = ir.getChannelData(c); for (let i = 0; i < ch.length; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / ch.length, 3); }
     this.verb.buffer = ir; const vg = this.ctx.createGain(); vg.gain.value = 0.25; this.verb.connect(vg); vg.connect(this.master);
   },
+  /* distorted "electric guitar" bus for the 80s round */
+  guitarBus() {
+    if (this._gtr || !this.ctx) return this._gtr;
+    const c = this.ctx, ws = c.createWaveShaper(), n = 1024, curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; curve[i] = Math.tanh(x * 6) * 0.9; }
+    ws.curve = curve; ws.oversample = "2x";
+    const pre = c.createGain(); pre.gain.value = 2.2; const lp = c.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 3400; lp.Q.value = 0.9;
+    const hp = c.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 90;
+    const post = c.createGain(); post.gain.value = 0.32;
+    pre.connect(ws); ws.connect(hp); hp.connect(lp); lp.connect(post); post.connect(this.music);
+    return (this._gtr = pre);
+  },
   setMuted(m) { this.muted = m; if (this.master) this.master.gain.setTargetAtTime(m ? 0 : 0.8, this.ctx.currentTime, 0.05); },
   get t() { return this.ctx ? this.ctx.currentTime : performance.now() / 1000; },
   mtof(m) { return 440 * Math.pow(2, (m - 69) / 12); },
@@ -1186,7 +1198,7 @@ const SND = {
     if (o.detune) osc.detune.value = o.detune;
     const g = c.createGain(); const v = o.vol ?? 0.3, a = o.a ?? 0.005, dur = o.dur ?? 0.3;
     g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v, t + a); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    let node = osc; if (o.lp) { const f = c.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = o.lp; f.Q.value = o.q || 0.7; osc.connect(f); node = f; }
+    let node = osc; if (o.lp) { const f = c.createBiquadFilter(); f.type = "lowpass"; f.Q.value = o.q || 0.7; f.frequency.setValueAtTime(o.lp, t); if (o.lp2) f.frequency.exponentialRampToValueAtTime(o.lp2, t + dur * (o.lpT || 0.7)); osc.connect(f); node = f; }
     node.connect(g); g.connect(o.bus || this.sfx); if (o.verb) g.connect(this.verb);
     osc.start(t); osc.stop(t + dur + 0.05);
   },
@@ -1213,23 +1225,47 @@ const SND = {
   fanfare() { const n = [67, 72, 76, 79, 84]; n.forEach((m, i) => this.tone({ f: this.mtof(m), at: this.t + i * 0.11, dur: 0.7, vol: 0.16, type: "triangle", verb: true })); },
 };
 
-/* ---- Music: an original upbeat synth-pop loop (D \u2013 A \u2013 Bm \u2013 G), scheduled on the audio clock ---- */
+/* ---- Music: two original backing tracks, scheduled on the audio clock ----
+   Round 1 "70s synth": four-on-the-floor disco kick, handclaps, a sequenced octave bass with a squelchy filter, string pads and a bright analog arpeggio (Am - F - C - G).
+   Round 2 "80s rock": big kick + gated snare, driving palm-muted power chords on a distorted guitar, root-note bass and a pentatonic lick (A5 - F5 - G5 - A5).
+   Both keep the same tempo and beat grid, so the note charts and timing are unchanged. */
 class Song {
-  constructor(bpm, bars) {
-    this.bpm = bpm; this.bars = bars; this.beat = 60 / bpm; this.start = 0; this.timer = null; this.next = 0; this.events = [];
-    const prog = [[50, [62, 66, 69]], [45, [61, 64, 69]], [47, [62, 66, 71]], [43, [62, 67, 71]]];
-    this.prog = prog;
-    for (let bar = 0; bar < bars; bar++) {
-      const [root, chord] = prog[bar % 4]; const b0 = bar * 4; const intro = bar < 2, outro = bar >= bars - 1;
-      this.events.push({ b: b0, k: "pad", chord, dur: 4 });
-      for (let q = 0; q < 8; q++) this.events.push({ b: b0 + q / 2, k: "hat", open: q % 2 === 1 });
-      if (!intro) {
-        this.events.push({ b: b0, k: "kick" }, { b: b0 + 2, k: "kick" }, { b: b0 + 2.5, k: "kick", soft: true });
-        this.events.push({ b: b0 + 1, k: "snare" }, { b: b0 + 3, k: "snare" });
-        for (let q = 0; q < 8; q++) this.events.push({ b: b0 + q / 2, k: "bass", m: root + (q === 6 ? 7 : q === 7 ? 12 : 0) });
-        if (bar % 2 === 1) for (let q = 0; q < 8; q++) this.events.push({ b: b0 + q / 2, k: "arp", m: chord[q % 3] + 12 + (q > 3 ? 12 : 0) });
-      } else { this.events.push({ b: b0 + 3, k: "snare", soft: true }); this.events.push({ b: b0 + 3.5, k: "snare", soft: true }); }
-      if (outro) this.events.push({ b: b0 + 4, k: "crash" });
+  constructor(bpm, bars, style = "70s") {
+    this.bpm = bpm; this.bars = bars; this.style = style; this.beat = 60 / bpm; this.start = 0; this.timer = null; this.next = 0; this.events = [];
+    const E = (b, k, o = {}) => this.events.push(Object.assign({ b, k }, o));
+    if (style === "80s") {
+      this.prog = [[45, [57, 61, 64]], [41, [57, 60, 65]], [43, [55, 59, 62]], [45, [57, 61, 64]]];
+      for (let bar = 0; bar < bars; bar++) {
+        const [root] = this.prog[bar % 4]; const b0 = bar * 4; const intro = bar < 2, outro = bar >= bars - 1;
+        for (let q = 0; q < 8; q++) E(b0 + q / 2, "hatC", { soft: q % 2 === 1 });
+        if (intro) {
+          for (let q = 0; q < 8; q++) E(b0 + q / 2, "gtr", { m: root, mute: true, soft: true });
+          if (bar === 1) { E(b0 + 3, "snareBig", { soft: true }); E(b0 + 3.5, "snareBig", { soft: true }); }
+          continue;
+        }
+        if (bar % 4 === 2 && !outro) E(b0, "crash");
+        E(b0, "kick"); E(b0 + 2, "kick"); E(b0 + 2.5, "kick", { soft: true });
+        E(b0 + 1, "snareBig"); E(b0 + 3, "snareBig");
+        if (bar % 2 === 0) { E(b0, "gtr", { m: root, ring: true }); for (let q = 2; q < 8; q++) E(b0 + q / 2, "gtr", { m: root, mute: true }); }
+        else for (let q = 0; q < 8; q++) E(b0 + q / 2, "gtr", { m: root, mute: q % 4 !== 0 });
+        for (let q = 0; q < 8; q++) E(b0 + q / 2, "bass8", { m: root });
+        if (bar % 4 === 1) [0, 3, 5, 7, 10, 12].forEach((s, j) => E(b0 + 2 + j * 0.25, "lick", { m: 69 + s }));
+        if (outro) { E(b0 + 4, "crash"); E(b0 + 4, "gtr", { m: 45, ring: true }); }
+      }
+    } else {
+      this.prog = [[45, [57, 60, 64]], [41, [57, 60, 65]], [48, [55, 60, 64]], [43, [55, 59, 62]]];
+      for (let bar = 0; bar < bars; bar++) {
+        const [root, chord] = this.prog[bar % 4]; const b0 = bar * 4; const intro = bar < 2, outro = bar >= bars - 1;
+        E(b0, "strings", { chord, dur: 4 });
+        for (let q = 0; q < 16; q++) E(b0 + q / 4, "seq", { m: root + (q % 2 ? 12 : 0) + (q % 8 === 7 ? 7 : 0), acc: q % 4 === 0 });
+        for (let q = 0; q < 16; q++) if (q % 2) E(b0 + q / 4, "hatC", { soft: true });
+        if (intro) continue;
+        for (let q = 0; q < 4; q++) { E(b0 + q, "kick", { disco: true }); E(b0 + q + 0.5, "hatO"); }
+        E(b0 + 1, "clap"); E(b0 + 3, "clap");
+        if (bar % 2 === 1) for (let q = 0; q < 8; q++) E(b0 + q / 2, "arp", { m: chord[q % 3] + 24 - (q > 3 ? 12 : 0) });
+        if (bar % 4 === 3 && !outro) { E(b0 + 3, "syndrum", { f: 900 }); E(b0 + 3.5, "syndrum", { f: 600 }); }
+        if (outro) E(b0 + 4, "crash");
+      }
     }
     this.events.sort((a, b) => a.b - b.b);
   }
@@ -1250,118 +1286,176 @@ class Song {
   now() { if (this.fake) return (window.__fakeT || 0) - this.start; return (this.useCtx ? SND.ctx.currentTime : performance.now() / 1000) - this.start; }
   get length() { return this.bars * 4 * this.beat; }
   fire(e, t) {
-    const S = SND, bus = S.music;
+    const S = SND, bus = S.music, bt = this.beat;
     switch (e.k) {
-      case "kick": S.tone({ f: 160, f2: 42, slide: 0.12, dur: 0.32, vol: e.soft ? 0.35 : 0.7, at: t, bus }); break;
-      case "snare": S.noiseHit({ ft: "bandpass", f: 2200, q: 0.6, dur: 0.16, vol: e.soft ? 0.12 : 0.32, at: t, bus }); S.tone({ f: 240, f2: 170, dur: 0.1, vol: e.soft ? 0.06 : 0.16, type: "triangle", at: t, bus }); break;
-      case "hat": S.noiseHit({ f: 8000, dur: e.open ? 0.09 : 0.035, vol: e.open ? 0.07 : 0.05, at: t, bus }); break;
-      case "crash": S.noiseHit({ f: 5000, dur: 1.4, vol: 0.18, at: t, bus }); break;
-      case "bass": S.tone({ f: S.mtof(e.m), dur: this.beat * 0.45, vol: 0.2, type: "sawtooth", lp: 520, q: 4, at: t, bus }); break;
-      case "arp": S.tone({ f: S.mtof(e.m), dur: this.beat * 0.4, vol: 0.045, type: "triangle", at: t, bus, verb: true }); break;
-      case "pad": for (const m of e.chord) { S.tone({ f: S.mtof(m), dur: this.beat * e.dur, a: 0.25, vol: 0.05, type: "sawtooth", lp: 1300, at: t, bus, detune: -7 }); S.tone({ f: S.mtof(m), dur: this.beat * e.dur, a: 0.25, vol: 0.05, type: "sawtooth", lp: 1300, at: t, bus, detune: 7 }); } break;
+      /* shared drums */
+      case "kick": S.tone({ f: e.disco ? 130 : 150, f2: 40, slide: 0.1, dur: e.disco ? 0.26 : 0.36, vol: e.soft ? 0.38 : 0.75, at: t, bus }); if (!e.disco) S.noiseHit({ ft: "lowpass", f: 1800, dur: 0.02, vol: 0.12, at: t, bus }); break;
+      case "hatC": S.noiseHit({ f: 9000, dur: 0.03, vol: e.soft ? 0.03 : 0.055, at: t, bus }); break;
+      case "hatO": S.noiseHit({ f: 7000, dur: 0.16, vol: 0.07, at: t, bus }); break;
+      case "crash": S.noiseHit({ f: 4500, dur: 1.6, vol: 0.2, at: t, bus }); break;
+      /* 70s */
+      case "clap": for (const d of [0, 0.011, 0.023]) S.noiseHit({ ft: "bandpass", f: 1300, q: 1.2, dur: d === 0.023 ? 0.14 : 0.025, vol: 0.22, at: t + d, bus }); break;
+      case "seq": S.tone({ f: S.mtof(e.m), dur: bt * 0.23, vol: e.acc ? 0.2 : 0.15, type: "sawtooth", lp: e.acc ? 2600 : 1900, lp2: 260, lpT: 0.9, q: 7, at: t, bus }); break;
+      case "strings": for (const m of e.chord) for (const dt of [-9, 9]) S.tone({ f: S.mtof(m), dur: bt * e.dur, a: 0.45, vol: 0.04, type: "sawtooth", lp: 2200, at: t, bus, detune: dt, verb: true }); break;
+      case "arp": S.tone({ f: S.mtof(e.m), dur: bt * 0.35, vol: 0.05, type: "square", lp: 3200, lp2: 900, at: t, bus, verb: true }); break;
+      case "syndrum": S.tone({ f: e.f, f2: e.f * 0.3, dur: 0.35, vol: 0.18, type: "sine", at: t, bus, verb: true }); break;
+      /* 80s */
+      case "snareBig": { const v = e.soft ? 0.14 : 0.36; S.noiseHit({ ft: "bandpass", f: 1900, q: 0.7, dur: 0.22, vol: v, at: t, bus }); S.tone({ f: 210, f2: 160, dur: 0.12, vol: v * 0.6, type: "triangle", at: t, bus, verb: true });
+        if (S.ctx && !e.soft) { const s = S.ctx.createBufferSource(); s.buffer = S.noise; const g = S.ctx.createGain(); g.gain.setValueAtTime(0.18, t); g.gain.setValueAtTime(0.18, t + 0.16); g.gain.linearRampToValueAtTime(0.0001, t + 0.2); const f = S.ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 2400; s.connect(f); f.connect(g); g.connect(S.verb); s.start(t, Math.random() * 0.5); s.stop(t + 0.25); } break; }
+      case "gtr": { const gb = S.guitarBus(); if (!gb) break; const dur = e.ring ? bt * 2 : e.mute ? bt * 0.16 : bt * 0.4; const v = (e.soft ? 0.05 : e.mute ? 0.09 : 0.12);
+        for (const [iv, dt] of [[12, -6], [19, 5], [24, 0]]) S.tone({ f: S.mtof(e.m + iv), dur, vol: v, type: "sawtooth", lp: e.mute ? 1400 : 4200, at: t, bus: gb, detune: dt }); break; }
+      case "bass8": S.tone({ f: S.mtof(e.m), dur: bt * 0.42, vol: 0.2, type: "sawtooth", lp: 700, q: 2, at: t, bus }); break;
+      case "lick": { const gb = S.guitarBus(); if (gb) S.tone({ f: S.mtof(e.m), f2: S.mtof(e.m) * 1.02, dur: bt * 0.24, vol: 0.09, type: "square", lp: 3600, at: t, bus: gb }); break; }
     }
   }
-  /* bell "lead" note for a successful hit, in key with the current chord */
-  hitNote(lane, beat) { const ch = this.chordAt(beat); const m = ch[lane % 3] + 12 + (lane === 3 ? 12 : 0); SND.tone({ f: SND.mtof(m), dur: 0.5, vol: 0.2, type: "sine", verb: true }); SND.tone({ f: SND.mtof(m + 12), dur: 0.25, vol: 0.06, type: "triangle" }); }
+  /* note for a successful hit, in key with the current chord */
+  hitNote(lane, beat) {
+    const ch = this.chordAt(beat); const m = ch[lane % 3] + 12 + (lane === 3 ? 12 : 0);
+    if (this.style === "80s") { const gb = SND.guitarBus(); if (gb) SND.tone({ f: SND.mtof(m), dur: 0.35, vol: 0.12, type: "square", lp: 4000, bus: gb }); SND.tone({ f: SND.mtof(m + 12), dur: 0.3, vol: 0.1, type: "sine", verb: true }); return; }
+    SND.tone({ f: SND.mtof(m), dur: 0.5, vol: 0.2, type: "sine", verb: true }); SND.tone({ f: SND.mtof(m + 12), dur: 0.25, vol: 0.06, type: "triangle" });
+  }
 }
 
 /* ================= Checkpoint questions (vocabulary from PBS 1.1.5 "Cell City" + "Life's Blueprint") ================= */
-/* a = index of correct option; why[i] = hint shown when option i is picked; after = shown once correct */
+/* a = index of correct option; why[i] = hint shown when option i is picked; after = shown once correct.
+   Wrong answers are near-misses: real terms from the same lessons that students are likely to mix up. */
 const Q = {
   vault: {
     q: "Which organelle is Cell City's \u201cCity Hall vault,\u201d where the DNA is stored?",
-    opts: ["Nucleus", "Mitochondria", "Golgi apparatus", "Ribosome"], a: 0,
-    why: [null, "Mitochondria are the power plants: they turn sugar + oxygen into ATP. (They carry a small loop of their own DNA, but the master blueprint book is kept somewhere else.)", "The Golgi is the shipping center: it packs, labels, and ships proteins.", "Ribosomes are the construction workers: they build proteins from DNA's instructions."],
+    opts: ["Nucleolus", "Mitochondria", "Nucleus", "Rough ER"], a: 2,
+    why: ["Close! The nucleolus sits inside the vault, but its job is building ribosome parts. The vault is the whole organelle around it.",
+      "Mitochondria do carry a small loop of their own DNA, but they're the power plants. The master blueprint book is kept somewhere else.",
+      null,
+      "The rough ER is attached to the vault's outer wall, but it's the factory floor where ribosomes build proteins."],
     after: "The nucleus stores and protects DNA behind its own double membrane: a vault inside City Hall.",
   },
   dnaName: {
     q: "Before we go in: what does DNA stand for?",
-    opts: ["Deoxyribose nuclear acid", "Deoxyribonucleic acid", "Double nucleotide acid", "Dinitrogen acid"], a: 1,
-    why: ["Close! Deoxyribose is DNA's sugar, but the full name ends in \u201cnucleic acid.\u201d", null, "DNA is made of nucleotides, but that's not what the letters stand for.", "Nope. Look for the sugar's name (deoxyribose) inside the answer."],
+    opts: ["Deoxyribonuclear acid", "Dioxyribonucleic acid", "Deoxyribonucleotide acid", "Deoxyribonucleic acid"], a: 3,
+    why: ["Close! It's \u201cnucleic,\u201d not \u201cnuclear.\u201d DNA is a nucleic acid.",
+      "Check the prefix: it's \u201cdeoxy,\u201d meaning \u201cmissing an oxygen.\u201d DNA's sugar has one less oxygen than RNA's sugar.",
+      "DNA is built from nucleotides, but the molecule's name ends in \u201cnucleic acid.\u201d",
+      null],
     after: "Deoxyribonucleic acid: \u201cdeoxyribo\u201d for its sugar, \u201cnucleic\u201d because it was first found in the nucleus.",
   },
   count: {
     q: "You just counted them. How many chromosomes are in a typical human body cell?",
-    opts: ["23", "46", "92", "48"], a: 1,
-    why: ["23 is the number of PAIRS (and the number in a sperm or egg cell). Count again!", null, "Each X-shape is ONE chromosome made of two identical copies (the cell copied its DNA to get ready to divide). So you see 92 strands, but still 46 chromosomes.", "48 is a chimpanzee's number! Humans have a different count."],
+    opts: ["44", "23", "92", "46"], a: 3,
+    why: ["44 is the number of non-sex chromosomes (autosomes). Don't forget the two sex chromosomes!",
+      "23 is the number of PAIRS (and the number in a sperm or egg cell). Count again!",
+      "Each X-shape is ONE chromosome made of two identical copies (the cell copied its DNA to get ready to divide). So you see 92 strands, but still 46 chromosomes.",
+      null],
     after: "46 chromosomes. Each one is a separate volume of the blueprint book.",
   },
   pairs: {
     q: "The 46 chromosomes sort into 23 pairs. Where did the two chromosomes in each pair come from?",
-    opts: ["Both came from Mom", "One from Mom, one from Dad", "One is a copy of the other", "Both came from Dad"], a: 1,
-    why: ["Then you'd look only like your mom! Each parent gave you half.", null, "Each chromosome in a pair came from a different parent, so they carry different versions of the same genes.", "Then you'd look only like your dad! Each parent gave you half."],
+    opts: ["One from Mom, one from Dad", "One is a copy the cell made of the other", "Both from Mom; Dad only gave the X or Y", "One from each grandparent"], a: 0,
+    why: [null,
+      "Identical copies are the two halves of each X shape (they're called sister chromatids). The two chromosomes in a PAIR came from different people.",
+      "Dad gave you 23 chromosomes too: one in every pair, not just the sex chromosomes.",
+      "One generation too far! Each pair is one from Mom and one from Dad (though each of those is a shuffled mix of your grandparents' DNA)."],
     after: "23 from Mom (pink) + 23 from Dad (blue) = 46. Pair 23 here is XY.",
   },
   chromatin: {
     q: "Most of the time, the DNA in the vault isn't X-shaped. It sits as loose threads called\u2026",
-    opts: ["Chromosomes", "Histones", "Chromatin", "Ribosomes"], a: 2,
-    why: ["X-shaped chromosomes only form on \u201cmoving day,\u201d when the cell packs its DNA to divide.", "Histones are the protein spools DNA wraps around, not the threads themselves.", null, "Ribosomes are the construction workers out in the cytoplasm."],
+    opts: ["Chromatids", "Chromatin", "Nucleosomes", "Centromeres"], a: 1,
+    why: ["Chromatids are the two identical halves of an X-shaped chromosome, which only exists on \u201cmoving day\u201d (cell division).",
+      null,
+      "Nucleosomes are the little beads along the thread (DNA wrapped on protein spools). The whole loose thread has another name.",
+      "A centromere is the pinched \u201cwaist\u201d where the two halves of an X-shaped chromosome join."],
     after: "Chromatin! Loose threads are easier for the cell to read. It only boxes them up into chromosomes when it divides.",
   },
   histone: {
     q: "Zooming in on the chromatin: what are these protein \u201cspools\u201d that DNA wraps around?",
-    opts: ["Nucleotides", "Histones", "Genes", "Phospholipids"], a: 1,
-    why: ["Nucleotides are the building blocks of the DNA thread itself.", null, "A gene is one section of DNA (one blueprint), not a protein spool.", "Phospholipids are the fat molecules that make up membranes."],
+    opts: ["Nucleosomes", "Polymerases", "Centrioles", "Histones"], a: 3,
+    why: ["Close! A nucleosome is the whole bead: DNA wrapped around a spool. The spool proteins themselves have another name.",
+      "Polymerases are enzymes that build new DNA or RNA strands. They move along DNA instead of holding it.",
+      "Centrioles help pull chromosomes apart during cell division, and they sit outside the nucleus.",
+      null],
     after: "Histones. DNA winds around them like thread on a spool, and the spools coil up tighter like a phone cord.",
   },
   franklin: {
     q: "Photo 51, the X-ray image that revealed DNA's double-helix shape, was made in whose lab?",
-    opts: ["James Watson's", "Francis Crick's", "Rosalind Franklin's", "Maurice Wilkins's"], a: 2,
-    why: ["Watson and Crick built the model, but they didn't take the photo. Watson saw it without Franklin's knowledge.", "Watson and Crick built the model, but they didn't take the photo.", null, "Wilkins was the colleague who showed Photo 51 to Watson, without Franklin's knowledge."],
+    opts: ["Maurice Wilkins's", "Rosalind Franklin's", "James Watson's", "Linus Pauling's"], a: 1,
+    why: ["Wilkins worked in the same building and showed Photo 51 to Watson, without the photographer's lab knowing. It wasn't his photo.",
+      null,
+      "Watson and Crick built the model, but they didn't take the photo. Watson saw it without its owner's knowledge.",
+      "Linus Pauling was racing to solve DNA too, but his 1953 model was a (wrong) triple helix. He never had this photo."],
     after: "Rosalind Franklin, an expert in X-ray crystallography. Photo 51 was taken in her lab by her student, Raymond Gosling.",
   },
   nucleotide: {
-    q: "Every nucleotide has three pieces: a phosphate, a nitrogenous base, and a\u2026",
-    opts: ["Histone", "Sugar (deoxyribose)", "Ribosome", "Protein"], a: 1,
-    why: ["Histones are spools outside the DNA, not part of a nucleotide.", null, "Ribosomes are whole machines that build proteins.", "Proteins are built FROM DNA's instructions; they aren't part of a nucleotide."],
+    q: "Every DNA nucleotide has three pieces: a phosphate, a nitrogenous base, and a\u2026",
+    opts: ["Sugar (ribose)", "Amino acid", "Hydrogen bond", "Sugar (deoxyribose)"], a: 3,
+    why: ["Very close! Ribose is RNA's sugar. DNA's sugar is missing one oxygen.",
+      "Amino acids are the building blocks of proteins, not of DNA.",
+      "Hydrogen bonds connect the bases of the two strands. They link nucleotides together but aren't a piece of one.",
+      null],
     after: "Sugar! In DNA it's deoxyribose. Sugar + phosphate make the sides of the ladder; the bases make the rungs.",
   },
   pairAT: {
     q: "Rule check before you repair: in DNA, adenine (A) always pairs with\u2026",
-    opts: ["Guanine (G)", "Thymine (T)", "Cytosine (C)", "Uracil (U)"], a: 1,
-    why: ["A and G are both big, two-ring bases. Two big bases won't fit in one rung.", null, "C pairs with G, not A.", "Uracil is RNA's base. DNA uses thymine instead."],
+    opts: ["Uracil (U)", "Guanine (G)", "Thymine (T)", "Cytosine (C)"], a: 2,
+    why: ["Uracil pairs with A in RNA. DNA uses thymine instead.",
+      "A and G are both big, two-ring bases. Two big bases won't fit in one rung.",
+      null,
+      "C pairs with G, not A."],
     after: "A pairs with T, and G pairs with C. Always.",
   },
   width: {
     q: "A big two-ring base (A or G) always pairs with a small one-ring base (T or C). Why does that matter?",
-    opts: ["It keeps every rung of the ladder the same width", "Big bases are only found in RNA", "It lets DNA leave the nucleus", "It makes the strand single-stranded"], a: 0,
-    why: [null, "All four DNA bases (A, T, G, C) are in DNA. RNA swaps T for U.", "DNA never leaves the vault. A copy (mRNA) does.", "Pairing is what holds the two strands together."],
+    opts: ["It makes the strands easier to unzip for copying", "Big bases form more hydrogen bonds, so they need a small partner", "It keeps every rung of the ladder the same width", "It keeps the sugar-phosphate backbone the right length"], a: 2,
+    why: ["Unzipping happens at the weak hydrogen bonds between bases. Mixing sizes isn't what makes that easy.",
+      "The number of hydrogen bonds depends on which pair it is (A\u2013T has 2, G\u2013C has 3), not on a base's size.",
+      null,
+      "The backbone's length depends on how many nucleotides there are. Pairing big with small sets the ladder's width."],
     after: "Big + small = same width every time, so the double helix stays smooth and even.",
   },
   photocopy: {
     q: "The DNA blueprints never leave the vault. So how do the instructions reach the ribosomes?",
-    opts: ["The whole chromosome leaves", "The cell makes an mRNA copy of one gene", "A histone carries the DNA out", "The ribosome goes into the nucleus"], a: 1,
-    why: ["Valuable originals stay locked in the vault!", null, "Histones stay in the nucleus as spools for DNA.", "Ribosomes work out in the city (cytoplasm). The instructions come to them."],
+    opts: ["The cell makes an mRNA copy of the whole chromosome", "The cell makes an mRNA copy of one gene", "The cell makes a DNA copy of one gene that leaves", "A ribosome enters the nucleus to read the DNA"], a: 1,
+    why: ["Too much! The photocopy is just ONE gene, not a whole volume of the blueprint book.",
+      null,
+      "Right size, wrong molecule: the working copy is RNA, not DNA.",
+      "Ribosomes work out in the city (the cytoplasm). The instructions come to them."],
     after: "A photocopy of ONE gene, called messenger RNA (mRNA). Making it is called transcription.",
   },
   uracil: {
     q: "RNA uses a different base in place of thymine (T). Which one?",
-    opts: ["Adenine (A)", "Uracil (U)", "Guanine (G)", "Cytosine (C)"], a: 1,
-    why: ["Adenine is in both DNA and RNA.", null, "Guanine is in both DNA and RNA.", "Cytosine is in both DNA and RNA."],
+    opts: ["Cytosine (C)", "Adenine (A)", "Guanine (G)", "Uracil (U)"], a: 3,
+    why: ["Cytosine is in both DNA and RNA.", "Adenine is in both DNA and RNA.", "Guanine is in both DNA and RNA.", null],
     after: "RNA \u201cU\u201dses Uracil. So when the DNA template says A, the mRNA gets U.",
   },
   ribosome: {
     q: "Your mRNA just slipped out through a nuclear pore. Where is it headed?",
-    opts: ["To a ribosome, which builds a protein", "To a mitochondrion, to make ATP", "Back into a chromosome", "Out of the cell"], a: 0,
-    why: [null, "Mitochondria make energy (ATP); they don't read mRNA from the nucleus.", "The original DNA stays in the vault. The copy is meant to be read outside it.", "mRNA stays inside the cell, where the ribosomes are."],
+    opts: ["To the Golgi, which reads it and packs a protein", "To the rough ER, which copies it back into DNA", "To a ribosome, which builds a protein", "To a mitochondrion, which uses it to make ATP"], a: 2,
+    why: ["The Golgi packs and ships proteins that are already built. It doesn't read mRNA.",
+      "Ribosomes on the rough ER do read mRNA, but nothing copies it back into DNA.",
+      null,
+      "Mitochondria make energy (ATP). They don't read instructions sent from the nucleus."],
     after: "DNA \u2192 mRNA \u2192 protein. The ribosome reads the copy and builds the protein.",
   },
   mutation: {
     q: "Radiation can change the order of bases in DNA. A change in the DNA sequence is called a\u2026",
-    opts: ["Transcription", "Mutation", "Chromatin", "Nucleotide"], a: 1,
-    why: ["Transcription is making an mRNA copy of a gene.", null, "Chromatin is the loose form DNA takes in the nucleus.", "A nucleotide is one building block of DNA."],
+    opts: ["Replication", "Translation", "Mutation", "Transcription"], a: 2,
+    why: ["Replication is the cell copying all its DNA before it divides. Copying errors can cause a change, but the change itself has another name.",
+      "Translation is when a ribosome reads mRNA to build a protein.",
+      null,
+      "Transcription is making an mRNA copy of a gene."],
     after: "A mutation. Cells have repair crews (enzymes) that fix most damage, using base-pairing rules just like the ones you'll use now.",
   },
   rnaRule: {
     q: "Round 2 uses mRNA rules. If the DNA template base is A, which base does the mRNA get?",
-    opts: ["T", "A", "U", "G"], a: 2,
-    why: ["T is DNA only. RNA never uses T.", "A pairs with its partner, not itself.", null, "G pairs with C."],
+    opts: ["T", "U", "A", "G"], a: 1,
+    why: ["That's the DNA rule! RNA never uses T.", null, "A pairs with its partner, not itself.", "G pairs with C."],
     after: "U! For mRNA: A\u2192U, T\u2192A, G\u2192C, C\u2192G.",
   },
   strands: {
     q: "Last one! Which molecule is single-stranded and carries a copy of one gene to the ribosome?",
-    opts: ["DNA", "mRNA", "Histone", "Chromosome"], a: 1,
-    why: ["DNA is double-stranded and stays in the vault.", null, "Histones are proteins, not genetic copies.", "A chromosome is a whole packed piece of DNA and never leaves the nucleus."],
+    opts: ["DNA", "tRNA", "mRNA", "A single unzipped DNA strand"], a: 2,
+    why: ["DNA is double-stranded and stays in the vault.",
+      "Close! tRNA is single-stranded RNA too, but it carries amino acids to the ribosome, not a copy of a gene.",
+      null,
+      "DNA only unzips briefly to be read or copied, and it never leaves the nucleus."],
     after: "mRNA: single-stranded, ribose sugar, bases A U C G. It's the working copy.",
   },
 };
@@ -1618,13 +1712,13 @@ function chart(round, slow, r) {
 async function rhythmRound(W, round, slow) {
   const rule = round === 1 ? PAIR_DNA : PAIR_RNA;
   const bpm = (round === 1 ? 96 : 102) * (slow ? 0.85 : 1);
-  const song = new Song(bpm, 20); const r = mulberry(G.seed + round * 101 + (slow ? 7 : 0));
+  const song = new Song(bpm, 20, round === 1 ? "70s" : "80s"); const r = mulberry(G.seed + round * 101 + (slow ? 7 : 0));
   const notes = chart(round, slow, r).map((n) => Object.assign(n, { t: n.beat * song.beat, base: LANES[n.lane], key: rule[LANES[n.lane]], judged: null }));
   const st = { score: 0, combo: 0, maxCombo: 0, hits: 0, perfect: 0, great: 0, good: 0, miss: 0, wrong: 0, built: 0 };
   const side = W.side[round - 1]; W.side.forEach((d) => (d.group.visible = false)); side.group.visible = true;
   W.sideCap.material.map.dispose(); const cap = textSprite(round === 1 ? "DNA you rebuilt" : "mRNA you built", { h: 0.8, color: "#06466f" }); W.sideCap.material = cap.material; W.sideCap.scale.copy(cap.scale);
   const sideTop = [], sideBot = [];
-  const hud = $("#rhud"); hud.hidden = false; $("#rRound").textContent = round === 1 ? "Round 1: DNA pairing (A\u2013T, G\u2013C)" : "Round 2: mRNA pairing (A\u2192U, T\u2192A, G\u2192C, C\u2192G)";
+  const hud = $("#rhud"); hud.hidden = false; $("#rRound").textContent = round === 1 ? "Round 1 \u00b7 70s Synth \u00b7 DNA pairing (A\u2013T, G\u2013C)" : "Round 2 \u00b7 80s Rock \u00b7 mRNA pairing (A\u2192U, T\u2192A, G\u2192C, C\u2192G)";
   const keysEl = $("#rkeys"); keysEl.innerHTML = ""; keysEl.hidden = false;
   const keyset = round === 1 ? ["A", "T", "G", "C"] : ["A", "U", "G", "C"];
   keyset.forEach((k) => { const b = document.createElement("button"); b.className = "kbtn b" + k; b.innerHTML = `<b>${k}</b><small>${BNAME[k]}</small>`; b.addEventListener("pointerdown", (e) => { e.preventDefault(); press(k); }); keysEl.appendChild(b); });
@@ -1905,7 +1999,10 @@ function frame(dt, skipRender) {
   }
 }
 const shake = { amt: 0 };
-const L = (key, text, at, side, y, a = 1, cls) => ({ key, text, at, side, y, a, cls });
+// labels that would give away a checkpoint answer carry a gate and only fade in once that question is answered
+const REV = new Map();
+const L = (key, text, at, side, y, a = 1, cls, gate) => ({ key, text, at, side, y, a: gate ? (REV.has(gate) ? a * clamp((T - REV.get(gate)) / 0.5) : 0) : a, cls });
+async function askThenShow(q, gate, showFor = 2.2) { await ask(q); REV.set(gate, T); if (showFor) await sleep(showFor); }
 
 /* ================= LEVEL 1: Into the Vault ================= */
 async function level1() {
@@ -1926,8 +2023,8 @@ async function level1() {
   await beat(8, (u, T) => { base(T); return { cam: camAt([{ t: 0, p: [40, 34, 270], l: [0, 0, 0] }, { t: 1, p: [96, 38, 112], l: [-6, 4, 0], fov: 46 }], u),
     labels: [L("mito", "Mitochondria: power plants (make ATP)", W.mitoA, "r", 0.2, ss(u, 0.5, 0.75)), L("golgi", "Golgi apparatus: shipping center", W.golgi, "l", 0.18, ss(u, 0.55, 0.8)),
       L("er", "Rough ER: factory floor", W.erAnchor, "l", 0.42, ss(u, 0.6, 0.85)), L("ribo", "Ribosomes: construction workers (build proteins)", W.riboAnchor, "r", 0.78, ss(u, 0.65, 0.9)),
-      L("nuc", "Nucleus: City Hall vault", V3(14, 26, 30), "r", 0.45, ss(u, 0.7, 0.95), "hot")] }; });
-  await ask(Q.vault);
+      L("nuc", "Nucleus: City Hall vault", V3(14, 26, 30), "r", 0.45, 1, "hot", "vault")] }; });
+  await askThenShow(Q.vault, "vault");
   say("The nucleus has <b>two</b> walls (a double membrane), and its doors are <b>nuclear pores</b>, guarded gates that control what goes in and out.");
   await beat(6, (u, T) => { memOp = ss(u, 0.3, 0.8); base(T); return { cam: camAt([{ t: 0, p: [96, 38, 112], l: [-6, 4, 0], fov: 46 }, { t: 0.6, p: P.clone().addScaledVector(dP, 16).addScaledVector(side, 6).toArray(), l: P.toArray(), fov: 40 }, { t: 1, p: P.clone().addScaledVector(dP, 7.5).addScaledVector(side, 2).toArray(), l: P.toArray(), fov: 40 }], u),
     labels: [L("dm", "Double membrane: the vault walls", P.clone().addScaledVector(side, -6).addScaledVector(V3(0, 1, 0), -3).addScaledVector(dP, -0.6), "l", 0.7, ss(u, 0.65, 0.9)), L("npc", "Nuclear pore: a guarded vault door", P, "r", 0.3, ss(u, 0.7, 0.95), "hot")] }; });
@@ -1945,19 +2042,23 @@ async function level1() {
     base(T); return { cam: { p: dC.clone().multiplyScalar(92), l: V3(0, 0, 0), fov: 46 }, labels: [L("cm", "Chromosome: one tightly packed piece of DNA", W.chr.items[0].g, "r", 0.28, ss(u, 0.2, 0.4))] };
   }, { skip: false });
   flashF = () => 0.12;
+  stage.labels.setCounter(null);
   await ask(Q.count);
+  stage.labels.setCounter("Chromosomes", "46", "#b8124a");
   say("Let's line them up by size. Biologists call this picture a <b>karyotype</b>.");
   await beat(5, (u, T) => { kary = ss(u, 0, 1); base(T); return { cam: { p: dC.clone().multiplyScalar(92), l: V3(0, 0, 0), fov: lerp(46, 54, kary) } }; });
   stage.labels.setCounter("Chromosomes", "46 = 23 pairs", "#b8124a");
-  say("<b>46 chromosomes = 23 pairs.</b> Pink ones came from Mom, blue ones from Dad. Pair 23 is the sex chromosomes: this cell is XY.");
-  await cont();
+  say("Lined up by size, the 46 chromosomes fall into <b>23 matching pairs</b>. Each pair has one pink and one blue chromosome.");
+  await sleep(1.5);
   await ask(Q.pairs);
+  say("<b>One from Mom, one from Dad.</b> Pink ones came from Mom, blue ones from Dad. Pair 23 is the sex chromosomes: this cell is XY.");
+  await cont();
   stage.labels.setCounter(null);
   say("Here's a secret: the X shape only appears on \u201cmoving day,\u201d when a cell packs up to divide. Watch what DNA looks like the rest of the time\u2026");
   await beat(4, (u, T) => { kary = 1 - ss(u, 0, 1); base(T); return { cam: { p: dC.clone().multiplyScalar(92), l: V3(0, 0, 0), fov: 46 } }; });
   await beat(8, (u, T) => { uns = ss(u, 0, 1); flashF = () => 0.12 * (1 - uns); base(T); return { cam: camAt([{ t: 0, p: dC.clone().multiplyScalar(92).toArray(), l: [0, 0, 0], fov: 46 }, { t: 1, p: dC.clone().multiplyScalar(80).add(V3(10, 6, 0)).toArray(), l: [0, 0, 0], fov: 46 }], u),
-    labels: [L("ch", "Chromatin: loose threads of blueprint", W.chr.items[4].g, "r", 0.3, ss(u, 0.6, 0.85)), L("ter", "Each chromosome keeps its own neighborhood (territory)", W.chr.items[17].g, "l", 0.72, ss(u, 0.75, 0.95))] }; });
-  await ask(Q.chromatin);
+    labels: [L("ch", "Chromatin: loose threads of blueprint", W.chr.items[4].g, "r", 0.3, 1, null, "chromatin"), L("ter", "Each chromosome keeps its own neighborhood (territory)", W.chr.items[17].g, "l", 0.72, ss(u, 0.75, 0.95))] }; });
+  await askThenShow(Q.chromatin, "chromatin");
   say("Let's zoom way in on one of those threads\u2026");
   const tgt = W.chr.items[4].terr.clone();
   await beat(2.4, (u, T) => { base(T); return { cam: camAt([{ t: 0, p: dC.clone().multiplyScalar(80).add(V3(10, 6, 0)).toArray(), l: [0, 0, 0], fov: 46 }, { t: 1, p: tgt.clone().addScaledVector(dC, 7).toArray(), l: tgt.toArray(), fov: 46 }], u) }; }, { skip: false });
@@ -1966,27 +2067,27 @@ async function level1() {
 }
 async function spoolScenes() {
   const W = worlds.spool; setNote("Zoomed in about 100\u00d7 more: nanometer scale, everything to scale.");
-  say("<b>Beads on a string.</b> DNA wraps around protein spools called <b>histones</b>, like thread around a spool. That's how about <b>2 meters</b> of DNA fits inside every tiny nucleus!");
+  say("<b>Beads on a string.</b> DNA wraps around tiny protein spools, like thread around a spool. That's how about <b>2 meters</b> of DNA fits inside every tiny nucleus!");
   const oc = W.nucs[1].position, oc2 = W.nucs[2].position;
   const sh = W.fr[Math.round(W.n * 0.31)].c, link = W.fr[Math.round(W.n * 0.69)].c;
   await beat(7, (u, T) => ({ cam: camAt([{ t: 0, p: [10, 26, 70], l: [0, 0, 0], fov: 40 }, { t: 1, p: [-6, 14, 44], l: [-4, 1, 0], fov: 40 }], u),
-    labels: [L("hist", "Histones: the protein spools", oc, "l", 0.25, ss(u, 0.3, 0.55), "hot"), L("thr", "DNA: the thread (wraps about 1.7 times)", sh, "r", 0.22, ss(u, 0.45, 0.7)), L("lnk", "Linker DNA between spools", W.fr[Math.round(W.n * 0.48)].c, "r", 0.75, ss(u, 0.6, 0.85))] }));
-  await ask(Q.histone);
+    labels: [L("hist", "Histones: the protein spools", oc, "l", 0.25, 1, "hot", "histone"), L("thr", "DNA: the thread (wraps about 1.7 times)", sh, "r", 0.22, ss(u, 0.45, 0.7)), L("lnk", "Linker DNA between spools", W.fr[Math.round(W.n * 0.48)].c, "r", 0.75, ss(u, 0.6, 0.85))] }));
+  await askThenShow(Q.histone, "histone");
   say("Closer still: the famous <b>double helix</b>, a twisted ladder. Its sides are sugar and phosphate; its rungs are pairs of bases.");
   const c = W.fr[W.heroIdx].c;
   await beat(6, (u, T) => ({ cam: camAt([{ t: 0, p: [-6, 14, 44], l: [-4, 1, 0], fov: 40 }, { t: 1, p: c.clone().add(V3(1.5, 2.5, 8.5)).toArray(), l: c.toArray(), fov: 42 }], u),
     labels: [L("dh", "Double helix: a twisted ladder", W.fr[W.heroIdx - 6].c, "l", 0.2, ss(u, 0.6, 0.85)), L("bb", "Sides: sugar-phosphate backbone", W.lay.top[W.heroIdx + 4].P, "r", 0.22, ss(u, 0.7, 0.9)), L("rg", "Rungs: base pairs", W.lay.top[W.heroIdx - 2].tip, "l", 0.78, ss(u, 0.75, 0.95))] }));
   await ask(Q.franklin);
-  say("Every rung-and-side piece is built from <b>nucleotides</b>. Here's one, pulled out so you can see its three parts.");
+  say("Every rung-and-side piece is built from <b>nucleotides</b>. Here's one, pulled out so you can see its three parts. Can you name them?");
   let hk = 0;
   W.lay.top[W.heroIdx].vis = true;
   await beat(5, (u, T) => {
     hk = ss(u, 0.1, 0.8); W.lay.top[W.heroIdx].vis = false; W.dna.apply(W.lay); const h = heroNuc(W, hk); W.hero.set([h]);
     const lab = [];
-    if (u > 0.75) { const a = ss(u, 0.75, 1); lab.push(L("hp", "Phosphate", h.P, "l", 0.25, a), L("hs", "Sugar (deoxyribose)", h.S, "l", 0.62, a), L("hb", `Nitrogenous base (${BNAME[h.base]})`, h.tip.clone().lerp(h.S, 0.3), "r", 0.4, a)); }
+    if (u > 0.75) { const a = ss(u, 0.75, 1); lab.push(L("hp", "Phosphate", h.P, "l", 0.25, a, null, "nucleotide"), L("hs", "Sugar (deoxyribose)", h.S, "l", 0.62, a, null, "nucleotide"), L("hb", `Nitrogenous base (${BNAME[h.base]})`, h.tip.clone().lerp(h.S, 0.3), "r", 0.4, a, null, "nucleotide")); }
     return { cam: camAt([{ t: 0, p: c.clone().add(V3(1.5, 2.5, 8.5)).toArray(), l: c.toArray(), fov: 42 }, { t: 1, p: c.clone().add(V3(0.6, 5.8, 19.5)).toArray(), l: c.clone().add(V3(0.2, 5.0, 9)).toArray(), fov: 42 }], u), labels: lab };
   });
-  await ask(Q.nucleotide);
+  await askThenShow(Q.nucleotide, "nucleotide", 2.6);
   say("You found the DNA! But something's wrong in this nucleus. Head to the repair lab\u2026");
   await cont("Go to Level 2 \u25b8");
   W.lay.top[W.heroIdx].vis = true; W.dna.apply(W.lay); W.hero.set([]);
